@@ -1,0 +1,377 @@
+---
+title: "F1_Data"
+output: html_document
+date: "2024-02-07"
+---
+
+Load Package
+
+```{r setup, include=FALSE}
+library(f1dataR)
+library(dplyr)
+library(ggplot2)
+
+round_n <- 12  # Round of the season
+season_n <- 2023 # Year of the season
+```
+
+Colors for tyres and teams, and relation driver-team
+
+```{r}
+library(racinglibraries)
+
+scuderia_colors <- scuderia_colors() # Correlates team and color
+tyre_colors <- tyre_colors()  # Correlates tyre and color
+drivers_teams <- team_scuderia()  # Correlates driver and team
+drivers_code <- codigo_piloto()  # Abbreviation of Driver Names
+
+associate_color <- function(pilotos, colores, equipos) {
+  colores_pilotos <- sapply(pilotos, function(piloto) unname(colores[equipos[piloto]]))
+  return(colores_pilotos)
+}
+
+# Correlates driver and color
+drivers_color <- associate_color(names(drivers_teams),
+                                 scuderia_colors,drivers_teams) 
+```
+
+
+Study Qualifying performance between teammates
+
+```{r}
+
+# Load Qualy Times and add relevant information
+
+qualifying <- f1dataR::load_quali(season = season_n, round = round_n)
+
+qualifying$driver_id <- drivers_code[match(qualifying$driver_id, names(drivers_code))]
+qualifying$Team <- drivers_teams[match(qualifying$driver_id,names(drivers_teams))]
+
+
+# Use Pole lap as a reference time
+
+pole_lap <- qualifying[1,]$q3_sec
+
+# Calculate Gaps for each Qualy round (Q1,Q2,Q3)
+
+gaps_mates <- qualifying %>%
+  group_by(Team) %>%
+  summarise(
+    fast_driver = first(driver_id),
+    dif_q1 = max(q1_sec) - min(q1_sec),
+    dif_q2 = max(q2_sec) - min(q2_sec),
+    dif_q3 = max(q3_sec) - min(q3_sec)
+  )
+
+
+#If Albon gets into Q2 but Sargeant doesn't, then the gap between them will be
+#the difference of their respective fastest times exclusively in Q1.
+
+#If Alonso gets into Q3 but Stroll is eliminated in Q2, then the gap between them 
+#will be the difference of their respective fastest times exclusively in Q2.
+
+# Isolate the last round where both teammates were present
+
+gaps_mates  <- gaps_mates %>%
+  summarise(Team = Team,
+            fast_driver = fast_driver,
+            gap = if_else(!is.na(dif_q3), 
+                          dif_q3, 
+                          if_else(!is.na(dif_q2), dif_q2, dif_q1)),
+            perc_gap = round(gap*100/pole_lap,3)) %>%
+  arrange(perc_gap)
+
+gaps_mates[,"fast_driver"] <- factor(gaps_mates$fast_driver, 
+                                     levels = gaps_mates$fast_driver)
+```
+
+```{r}
+ggplot(data = gaps_mates, aes(fast_driver,perc_gap, fill = Team)) +
+  geom_bar(stat = "identity") + 
+  scale_fill_manual(values = scuderia_colors) +
+  theme_dark_f1(axis_marks = TRUE) +
+  labs(title = "% Gap between Teammates") 
+```
+
+--------------------------------------------------------------------------------
+
+
+Load Results of the race
+```{r}
+
+# FInal results of the race
+race_result <- f1dataR::load_results(season = season_n,
+                                     round = round_n)
+
+race_result$driver <- drivers_code[match(race_result$driver_id,names(drivers_code))]
+race_result$driver <- factor(race_result$driver,levels = race_result$driver)
+race_result$team <- drivers_teams[match(race_result$driver,names(drivers_teams))]
+
+```
+
+
+Evaluate Top speeds reached during the race.
+```{r}
+
+# Discard NA values of top speeds
+speeds <- race_result[!is.na(race_result$top_speed_kph),]
+# Sort the speeds
+speeds <- speeds %>%
+  arrange(desc(top_speed_kph))
+# Convert speeds to factor for the plot
+speeds$driver <- factor(speeds$driver,levels = speeds$driver)
+                            
+ggplot(data = speeds, aes(driver,top_speed_kph, fill = team)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = scuderia_colors) +
+  theme_dark_f1(axis_marks = TRUE) +
+  labs(title = "Top Speeds")
+```
+
+Positions Gained and Lost of each driver
+```{r}
+
+#Change column names
+race_result$lap_number = 0
+colnames(race_result)[5] <- "position"
+colnames(race_result)[4] <- "final_position"
+
+# Calculate the balance of positions gained
+race_result$position <- as.numeric(race_result$position)
+race_result$final_position <- as.numeric(race_result$final_position)
+race_result[,"balance"] <- race_result$position - race_result$final_position
+
+ggplot(data = race_result[race_result$position != 0,],
+       aes(driver,balance,fill = team, color = status)) + 
+  geom_bar(stat = "identity", size = 1) +
+  scale_fill_manual(values = scuderia_colors) +
+  theme_dark_f1(axis_marks = TRUE) +
+  labs(title = "Positions Gained/Lost during the Race")
+```
+
+
+
+Lap by lap Information about the race
+```{r}
+# Download all the information about the race
+race_times <- f1dataR::load_session_laps(season = season_n,
+                                round = round_n,
+                                session = "R")
+
+race_times$team <- drivers_teams[race_times$driver]
+# Arrange stints of drivers
+stint <- paste("Stint",race_times$stint,sep = "_")
+race_times[,"stint"] <- stint
+
+```
+
+
+
+Evolution of track position during the race
+
+```{r}
+ggplot(data = race_times,aes(lap_number, position, line = driver, point = driver)) +
+  geom_point(data = race_times, aes(lap_number, position, color = team))+
+  geom_point(data = race_result, aes(lap_number,position,color = team)) +
+  geom_line(data = race_times, aes(lap_number,position,color = team)) +
+  geom_line(data = race_result, aes(lap_number,position,color = team)) +
+  geom_label(data = race_result[race_result$lap_number == 0,],
+             aes(label = driver, fill = team,hjust = 1.2), show.legend = F) +
+  geom_label(data = race_times[race_times$lap_number == max(race_times$lap_number),],
+             aes(label = driver, fill = team),hjust = -0.15, show.legend = F) +
+  scale_color_manual(values = scuderia_colors) +
+  scale_fill_manual(values = scuderia_colors) +
+  scale_y_reverse() +
+  theme_dark_f1(axis_marks = TRUE)
+```
+Pit stops of each driver
+
+```{r}
+pit_stops <- race_times %>%
+  group_by(driver,team) %>%
+  filter(pit_out_time != "NaN") %>%
+  summarise(pit_stops = n())
+
+ggplot(pit_stops,aes(pit_stops,driver,fill = team)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = scuderia_colors) +
+  theme_dark_f1(axis_marks = TRUE) +
+  labs(title = "Pit Stops Made")
+```
+
+BoxPlot of Race Pace
+```{r}
+
+# Eliminate drivers which ahve not completed more than 75 % laps
+
+filtered_race_times <- race_times %>%
+  mutate(
+    total_laps = max(lap_number)
+  ) %>%
+  group_by(driver,team) %>%
+  mutate(
+    laps_completed = max(lap_number)
+    ) %>%
+  filter(laps_completed == total_laps) %>%
+  filter(lap_time != "NaN") %>%
+  select(-laps_completed,-total_laps)
+
+
+filtered_race_times$driver <- factor(filtered_race_times$driver,
+                                     levels = unique(filtered_race_times$driver))
+  
+ggplot(data = filtered_race_times, aes(driver,lap_time,fill = team)) +
+  geom_boxplot(color = "brown",outlier.color = "white") +
+  scale_fill_manual(values = scuderia_colors) +
+  theme_dark_f1(axis_marks = TRUE)
+```
+
+
+
+Pace by stint of each Driver
+
+```{r}
+
+drivers_interest <- filtered_race_times[filtered_race_times$driver_number %in% c(16,14,44,1),]
+
+stints <- drivers_interest %>%
+  group_by(driver,stint,compound) %>%
+  filter(
+    lap_number == min(lap_number)
+  ) %>%
+  summarise(
+    lap_number = lap_number,
+    lap_time = lap_time
+  )
+
+n_stints <- length(unique(filtered_race_times$stint))
+
+# Full race
+
+ggplot(data = drivers_interest, aes(lap_number, lap_time, color = driver)) +
+  geom_point(alpha = 0) +
+  geom_line() +
+  scale_color_manual(values = drivers_color) +
+  scale_fill_manual(values = tyre_colors) +
+  geom_label(data = stints, mapping = aes(label = compound, fill = compound), color = "black",show.legend = FALSE) + 
+  theme_dark_f1(axis_marks = TRUE) 
+
+# Separate by stints
+ggplot(data = drivers_interest, aes(lap_number,lap_time, color = driver, fill = compound)) +
+  geom_line() +
+  scale_color_manual(values = drivers_color) +
+  scale_fill_manual(values = tyre_colors) +
+  geom_label(data = stints, mapping = aes(label = compound), color = "black", show.legend = FALSE) + 
+  facet_wrap(~stint, ncol = n_stints, scales = "free_x") +
+  theme_dark_f1(axis_marks = TRUE) 
+```
+
+
+
+```{r}
+
+# Eliminate outlier laps
+
+race_wo_outliers <- race_times[race_times$lap_time != "NaN",] %>%
+  filter(lap_time < quantile(lap_time, 0.75) + 1.5*IQR(lap_time))
+
+
+# Who made the average faster lap times
+library(tidyverse)
+avg_laptimes <- race_wo_outliers %>%
+  group_by(driver, team) %>%
+  summarise(
+    avg_lap = mean(lap_time),
+  )
+
+# Fastest driver on average
+reference <- min(avg_laptimes$avg_lap)
+pace_gaps <- avg_laptimes %>%
+  mutate(
+    gap_secs = avg_lap - reference
+  ) %>%
+  arrange(gap_secs)
+
+# Ordenar pilotos
+
+pace_gaps$driver <- factor(pace_gaps$driver, levels = pace_gaps$driver)
+
+ggplot(data = pace_gaps, aes(driver, gap_secs, fill = team)) +
+  geom_bar(stat = "identity")  +
+  scale_fill_manual(values = scuderia_colors) +
+  theme_dark_f1(axis_marks = TRUE) +
+  labs(title = "Gap in race pace to fastest")
+```
+
+
+Stints of the driver
+
+```{r}
+driver_stints <- "HAM"
+ggplot(data = race_wo_outliers[race_wo_outliers$driver == driver_stints,], aes(stint,lap_time,fill = compound) ) +
+  geom_boxplot(outlier.colour = "purple", color = "orange") +
+  labs(title = paste("Stints",driver_stints,sep = " ")) +
+  theme(title = element_text(colour = "white")) +
+  theme(axis.text.x = element_blank()) +
+  scale_fill_manual(values = tyre_colors) +
+  theme_dark_f1(axis_marks = TRUE)
+```
+
+Show best strategy
+
+```{r}
+strategy <- race_times %>%
+  group_by(driver, team,stint,compound) %>%
+    summarise(
+    time_stint = sum(lap_time),
+    lap_race = max(lap_number) - min(lap_number) + 1,
+    strategy = paste(unique(compound),collapse = "-")
+    ) %>%
+  group_by(driver,team) %>%
+  summarise(
+    strategy = paste(strategy,collapse = "-"),
+    compound = compound,
+    time_stint = time_stint,
+    lap_race = lap_race,
+    total_time = sum(time_stint),
+    stint = stint
+  ) %>%
+  arrange(total_time)
+```
+
+Msotrar estrategias de los pilotos
+
+```{r}
+
+strategy$compound <- factor(strategy$compound,levels = unique(strategy$compound))
+ggplot(race_times, aes(lap_number,y=driver,color=compound,fill = stint)) +
+  geom_line(size = 3) +
+  scale_color_manual(values = tyre_colors) + 
+  theme(axis.text.x = element_text(angle = 90)) +
+  theme_dark_f1(axis_marks = TRUE) + 
+  scale_x_continuous(breaks = seq(1,max(race_times$lap_number),by=11))
+```
+
+Ver la degradación de neumatico
+
+```{r}
+deg <- race_wo_outliers[race_wo_outliers$pit_in_time == "NaN",] %>%
+  group_by(driver,stint,team,compound) %>%
+  summarise(
+    dif_time = (median(lap_time) - min(lap_time))/n(),
+    n_laps = n()
+  )
+
+ggplot(data = deg, aes(n_laps,dif_time,fill = team)) +
+  geom_point(alpha = 0) +
+  scale_fill_manual(values = scuderia_colors)+
+  scale_color_manual(values = tyre_colors) +
+  geom_label(aes(label = driver, color = compound), show.legend = T, label.size = 0.9) +
+  geom_text(aes(label = driver),color = "purple", show.legend = F) +
+  theme_dark_f1(axis_marks = TRUE) +
+  facet_wrap(~compound) 
+  scale_y_reverse()
+```
+
+
+
